@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Tab Hoarders Friend",
+  "version": "1.0.0",
+  "description": "Automatically closes inactive tabs after a set time and saves them to bookmarks",
+  "permissions": [
+    "tabs",
+    "bookmarks",
+    "storage",
+    "alarms",
+    "contextMenus",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Tab Hoarders Friend",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

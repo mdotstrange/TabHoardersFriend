@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tab Hoarders Friend</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Tab Hoarders Friend</h1>
+
+    <div class="setting">
+      <label for="tab-name">Rename current tab:</label>
+      <div class="rename-container">
+        <input type="text" id="tab-name" placeholder="Enter custom name...">
+        <button id="save-name">Save</button>
+        <button id="clear-name" title="Clear custom name">X</button>
+      </div>
+      <div class="current-name" id="current-name"></div>
+    </div>
+
+    <div class="setting">
+      <label for="timer-slider">Auto-close tabs after:</label>
+      <div class="slider-container">
+        <input type="range" id="timer-slider" min="1" max="99" value="30">
+        <span id="timer-value">30</span> minutes
+      </div>
+    </div>
+
+    <button id="hoard-all" class="hoard-btn">Hoard All Tabs Not Pinned Down</button>
+
+    <button id="export-hoard" class="export-btn">Export Hoard as CSV</button>
+
+    <div class="info">
+      <p>Pinned tabs are never auto-closed.</p>
+      <p>Closed tabs are saved to a bookmarks folder with today's date.</p>
+      <p>Custom tab names will be used as bookmark names.</p>
+    </div>
+
+    <div class="status" id="status"></div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
