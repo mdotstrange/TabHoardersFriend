@@ -1,3 +1,4 @@
+![Alt text](icons/icon128.png)
 # Tab Hoarders Friend
 
 A Chrome extension for tab hoarders who open too many tabs and forget about them. It automatically closes inactive tabs after a set time and saves them to bookmarks so you never lose them.
