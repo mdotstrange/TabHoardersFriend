@@ -119,4 +119,4 @@ Other Bookmarks/
 
 ## License
 
-MIT License - Feel free to use, modify, and distribute.
+GPLv3

@@ -27,8 +27,6 @@ chrome.runtime.onInstalled.addListener(async () => {
     contexts: ['page']
   });
 
-  console.log('[Tab Hoarders Friend] Extension installed/updated');
-  // Initialize after install
   await initializeTimers();
 });
 
@@ -58,15 +56,13 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
           const tabNames = result.tabNames || {};
           tabNames[tab.id] = newName;
           await chrome.storage.local.set({ tabNames });
-          console.log(`[Tab Hoarders Friend] Tab ${tab.id} renamed to: ${newName}`);
         } else {
           // Empty string clears the name
           await removeCustomTabName(tab.id);
-          console.log(`[Tab Hoarders Friend] Tab ${tab.id} name cleared`);
         }
       }
     } catch (error) {
-      console.log(`[Tab Hoarders Friend] Cannot rename tab: ${error.message}`);
+      // Cannot rename tab (e.g., chrome:// pages)
     }
   }
 });
@@ -86,17 +82,12 @@ async function startTabTimer(tabId) {
   await chrome.alarms.create(alarmName, {
     delayInMinutes: minutes
   });
-
-  console.log(`[Tab Hoarders Friend] Timer STARTED for tab ${tabId} - closes in ${minutes} min`);
 }
 
 // Clear timer for a tab
 async function clearTabTimer(tabId) {
   const alarmName = `tab-timer-${tabId}`;
-  const wasCleared = await chrome.alarms.clear(alarmName);
-  if (wasCleared) {
-    console.log(`[Tab Hoarders Friend] Timer CLEARED for tab ${tabId}`);
-  }
+  await chrome.alarms.clear(alarmName);
 }
 
 // Format date as "Month Day Year" (e.g., "January 27 2026")
@@ -230,43 +221,30 @@ async function saveTabToBookmarks(tab) {
     title: bookmarkTitle,
     url: tab.url
   });
-
-  console.log(`[Tab Hoarders Friend] Bookmarked: ${bookmarkTitle}${customName ? ' (custom name)' : ''}`);
 }
 
 // Close tab and save to bookmarks
 async function closeTabAndSave(tabId) {
-  console.log(`[Tab Hoarders Friend] Alarm fired for tab ${tabId}`);
-
   try {
     const tab = await chrome.tabs.get(tabId);
 
-    if (tab.pinned) {
-      console.log(`[Tab Hoarders Friend] Tab ${tabId} is pinned, skipping`);
-      return;
-    }
-
-    if (tab.active) {
-      console.log(`[Tab Hoarders Friend] Tab ${tabId} is active, skipping`);
+    // Skip pinned or active tabs
+    if (tab.pinned || tab.active) {
       return;
     }
 
     await saveTabToBookmarks(tab);
     await removeCustomTabName(tabId);
     await chrome.tabs.remove(tabId);
-    console.log(`[Tab Hoarders Friend] Tab ${tabId} CLOSED`);
-
   } catch (error) {
-    console.log(`[Tab Hoarders Friend] Tab ${tabId} error:`, error.message);
+    // Tab may have been closed already
   }
 }
 
-// Handle tab activation changes - THIS IS THE MAIN TIMER LOGIC
+// Handle tab activation changes
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
   const { tabId, windowId } = activeInfo;
   const previousActiveTabId = activeTabByWindow.get(windowId);
-
-  console.log(`[Tab Hoarders Friend] Tab switched: ${previousActiveTabId} -> ${tabId}`);
 
   // Update tracking AFTER getting previous
   activeTabByWindow.set(windowId, tabId);
@@ -287,25 +265,20 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   }
 });
 
-// Listen for new tabs - DON'T track active here, let onActivated handle it
+// Listen for new tabs
 chrome.tabs.onCreated.addListener(async (tab) => {
-  console.log(`[Tab Hoarders Friend] New tab: ${tab.id}, active: ${tab.active}`);
-
   // Only start timer for background tabs (opened via middle-click, etc.)
   if (!tab.pinned && !tab.active) {
     await startTabTimer(tab.id);
   }
-  // If tab is active, onActivated will fire and handle the previous tab
 });
 
 // Listen for tab updates (pin/unpin)
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   if (changeInfo.hasOwnProperty('pinned')) {
     if (changeInfo.pinned) {
-      console.log(`[Tab Hoarders Friend] Tab ${tabId} pinned`);
       await clearTabTimer(tabId);
     } else if (!tab.active) {
-      console.log(`[Tab Hoarders Friend] Tab ${tabId} unpinned`);
       await startTabTimer(tabId);
     }
   }
@@ -327,10 +300,8 @@ chrome.windows.onRemoved.addListener((windowId) => {
   activeTabByWindow.delete(windowId);
 });
 
-// Listen for alarms - THIS CLOSES TABS
+// Listen for alarms
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  console.log(`[Tab Hoarders Friend] ALARM: ${alarm.name}`);
-
   if (alarm.name.startsWith('tab-timer-')) {
     const tabId = parseInt(alarm.name.replace('tab-timer-', ''));
     await closeTabAndSave(tabId);
@@ -338,7 +309,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 // Handle messages from popup
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message.action === 'hoardAllTabs') {
     hoardAllTabs().then(sendResponse);
     return true; // Keep channel open for async response
@@ -351,8 +322,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Export all day folders as data for CSV generation
 async function exportHoardData() {
-  console.log('[Tab Hoarders Friend] Exporting hoard data...');
-
   try {
     // Find the parent folder
     const searchResults = await chrome.bookmarks.search({ title: PARENT_FOLDER_NAME });
@@ -384,30 +353,20 @@ async function exportHoardData() {
       }
     }
 
-    console.log(`[Tab Hoarders Friend] Found ${exportData.length} day folders to export`);
     return { success: true, data: exportData };
-
   } catch (error) {
-    console.log('[Tab Hoarders Friend] Export error:', error.message);
     return { success: false, error: error.message };
   }
 }
 
 // Hoard all non-pinned, non-active tabs immediately
 async function hoardAllTabs() {
-  console.log('[Tab Hoarders Friend] Hoarding all tabs...');
-
   const tabs = await chrome.tabs.query({});
   let count = 0;
 
   for (const tab of tabs) {
-    // Skip pinned tabs
-    if (tab.pinned) continue;
-
-    // Skip active tabs
-    if (tab.active) continue;
-
-    // Skip chrome:// and other restricted URLs
+    // Skip pinned, active, or restricted tabs
+    if (tab.pinned || tab.active) continue;
     if (tab.url.startsWith('chrome://') ||
         tab.url.startsWith('chrome-extension://') ||
         tab.url.startsWith('about:')) {
@@ -420,51 +379,29 @@ async function hoardAllTabs() {
       await removeCustomTabName(tab.id);
       await chrome.tabs.remove(tab.id);
       count++;
-      console.log(`[Tab Hoarders Friend] Hoarded: ${tab.title}`);
     } catch (error) {
-      console.log(`[Tab Hoarders Friend] Error hoarding tab ${tab.id}:`, error.message);
+      // Skip tabs that can't be hoarded
     }
   }
 
-  console.log(`[Tab Hoarders Friend] Hoarded ${count} tabs`);
   return { count };
 }
 
 // Initialize - set up tracking and timers for existing tabs
 async function initializeTimers() {
-  console.log('[Tab Hoarders Friend] Initializing...');
-
   const windows = await chrome.windows.getAll({ populate: true });
-
-  if (windows.length === 0) {
-    console.log('[Tab Hoarders Friend] No windows found');
-    return;
-  }
-
-  let activeCount = 0;
-  let timerCount = 0;
 
   for (const window of windows) {
     if (!window.tabs) continue;
 
     for (const tab of window.tabs) {
       if (tab.active) {
-        // Track active tab for this window
         activeTabByWindow.set(window.id, tab.id);
-        activeCount++;
-        console.log(`[Tab Hoarders Friend] Active tab in window ${window.id}: ${tab.id}`);
       } else if (!tab.pinned) {
-        // Start timer for inactive, unpinned tabs
         await startTabTimer(tab.id);
-        timerCount++;
       }
     }
   }
-
-  console.log(`[Tab Hoarders Friend] Init complete: ${activeCount} active, ${timerCount} timers started`);
-
-  const allAlarms = await chrome.alarms.getAll();
-  console.log(`[Tab Hoarders Friend] Total alarms: ${allAlarms.length}`);
 }
 
 // Initialize on browser startup
