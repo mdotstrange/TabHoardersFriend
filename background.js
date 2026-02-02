@@ -200,6 +200,34 @@ async function removeCustomTabName(tabId) {
   }
 }
 
+// Check if URL already exists in TabHoardersFriend folder
+async function urlExistsInHoard(url) {
+  // Find the parent folder
+  const searchResults = await chrome.bookmarks.search({ title: PARENT_FOLDER_NAME });
+  const parentFolder = searchResults.find(item => !item.url && item.title === PARENT_FOLDER_NAME);
+
+  if (!parentFolder) {
+    return false;
+  }
+
+  // Get all day folders
+  const dayFolders = await chrome.bookmarks.getChildren(parentFolder.id);
+
+  for (const folder of dayFolders) {
+    if (folder.url) continue; // Skip if it's a bookmark, not a folder
+
+    // Get bookmarks in this day folder
+    const bookmarks = await chrome.bookmarks.getChildren(folder.id);
+    for (const bookmark of bookmarks) {
+      if (bookmark.url === url) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 // Save tab URL to bookmarks
 async function saveTabToBookmarks(tab) {
   if (!tab || !tab.url) return;
@@ -207,6 +235,11 @@ async function saveTabToBookmarks(tab) {
   if (tab.url.startsWith('chrome://') ||
       tab.url.startsWith('chrome-extension://') ||
       tab.url.startsWith('about:')) {
+    return;
+  }
+
+  // Check if URL already exists in hoard
+  if (await urlExistsInHoard(tab.url)) {
     return;
   }
 
