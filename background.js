@@ -4,6 +4,9 @@ const DEFAULT_TIMER_MINUTES = 30;
 // Parent folder name
 const PARENT_FOLDER_NAME = 'TabHoardersFriend';
 
+// Name of the single repeating alarm that sweeps for expired tab deadlines
+const SWEEP_ALARM_NAME = 'sweep-timer';
+
 // Track currently active tab per window
 const activeTabByWindow = new Map();
 
@@ -19,6 +22,12 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!settings.timerMinutes) {
     await chrome.storage.sync.set({ timerMinutes: DEFAULT_TIMER_MINUTES });
   }
+
+  // Migration from the old per-tab alarm design: previous versions created
+  // one alarm per tab (tab-timer-<id>), which hits Chrome's 500-alarm cap.
+  // Wipe everything and re-create just the single sweep alarm.
+  await chrome.alarms.clearAll();
+  await ensureSweepAlarm();
 
   // Create context menu for renaming tabs
   chrome.contextMenus.create({
@@ -73,21 +82,51 @@ async function getTimerMinutes() {
   return settings.timerMinutes || DEFAULT_TIMER_MINUTES;
 }
 
-// Start a timer for a tab
+// Make sure the single repeating sweep alarm exists. Only creates it when
+// missing so re-calling this doesn't reset the alarm's phase.
+async function ensureSweepAlarm() {
+  const existing = await chrome.alarms.get(SWEEP_ALARM_NAME);
+  if (!existing) {
+    // 1 minute matches the minimum of the timer slider
+    await chrome.alarms.create(SWEEP_ALARM_NAME, { periodInMinutes: 1 });
+  }
+}
+
+// Serialize read-modify-writes on the shared tabDeadlines object so
+// concurrent tab events (onActivated, onRemoved, onCreated) can't clobber
+// each other (same idea as saveChain below)
+let deadlineChain = Promise.resolve();
+
+// Queue a mutation of the tabDeadlines map in chrome.storage.local.
+// fn receives the current { tabId: epochMs } object and returns the new one.
+function mutateDeadlines(fn) {
+  const run = deadlineChain.then(async () => {
+    const result = await chrome.storage.local.get(['tabDeadlines']);
+    const deadlines = result.tabDeadlines || {};
+    const updated = fn(deadlines) || deadlines;
+    await chrome.storage.local.set({ tabDeadlines: updated });
+    return updated;
+  });
+  deadlineChain = run.catch(() => {}); // keep the chain alive if a write fails
+  return run;
+}
+
+// Start (or restart) the countdown for a tab by recording its close deadline
 async function startTabTimer(tabId) {
   const minutes = await getTimerMinutes();
-  const alarmName = `tab-timer-${tabId}`;
-
-  // Create alarm for this specific tab
-  await chrome.alarms.create(alarmName, {
-    delayInMinutes: minutes
+  const deadline = Date.now() + minutes * 60000;
+  await mutateDeadlines((deadlines) => {
+    deadlines[tabId] = deadline;
+    return deadlines;
   });
 }
 
-// Clear timer for a tab
+// Clear the countdown for a tab
 async function clearTabTimer(tabId) {
-  const alarmName = `tab-timer-${tabId}`;
-  await chrome.alarms.clear(alarmName);
+  await mutateDeadlines((deadlines) => {
+    delete deadlines[tabId];
+    return deadlines;
+  });
 }
 
 // Format date as "Month Day Year" (e.g., "January 27 2026")
@@ -443,11 +482,47 @@ chrome.windows.onRemoved.addListener((windowId) => {
   activeTabByWindow.delete(windowId);
 });
 
-// Listen for alarms
+// Sweep once a minute: close tabs whose deadline has passed and prune
+// entries for tabs that no longer exist
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  if (alarm.name.startsWith('tab-timer-')) {
-    const tabId = parseInt(alarm.name.replace('tab-timer-', ''));
-    await closeTabAndSave(tabId);
+  // Ignore anything that isn't the sweep (e.g. legacy tab-timer-* alarms)
+  if (alarm.name !== SWEEP_ALARM_NAME) {
+    return;
+  }
+
+  const result = await chrome.storage.local.get(['tabDeadlines']);
+  const deadlines = result.tabDeadlines || {};
+  const now = Date.now();
+
+  // One query for all open tabs instead of a tabs.get per entry
+  const tabs = await chrome.tabs.query({});
+  const openTabIds = new Set(tabs.map(tab => tab.id));
+
+  const removeIds = [];
+
+  for (const key of Object.keys(deadlines)) {
+    const tabId = parseInt(key);
+
+    if (!openTabIds.has(tabId)) {
+      // Tab was closed (possibly while the worker was asleep) - just prune
+      removeIds.push(tabId);
+      continue;
+    }
+
+    if (deadlines[key] <= now) {
+      // closeTabAndSave already tolerates missing/active/pinned tabs
+      await closeTabAndSave(tabId);
+      removeIds.push(tabId);
+    }
+  }
+
+  if (removeIds.length > 0) {
+    await mutateDeadlines((current) => {
+      for (const tabId of removeIds) {
+        delete current[tabId];
+      }
+      return current;
+    });
   }
 });
 
@@ -577,9 +652,13 @@ async function hoardAllTabs() {
   return { count };
 }
 
-// Initialize - set up tracking and timers for existing tabs
+// Initialize - rebuild active-tab tracking and reconcile stored deadlines.
+// Runs on every service worker wake (see setTimeout below), so it must be
+// idempotent: existing deadlines are kept, never reset.
 async function initializeTimers() {
   const windows = await chrome.windows.getAll({ populate: true });
+
+  const eligibleTabIds = []; // non-active, non-pinned tabs that should count down
 
   for (const window of windows) {
     if (!window.tabs) continue;
@@ -588,10 +667,37 @@ async function initializeTimers() {
       if (tab.active) {
         activeTabByWindow.set(window.id, tab.id);
       } else if (!tab.pinned) {
-        await startTabTimer(tab.id);
+        eligibleTabIds.push(tab.id);
       }
     }
   }
+
+  const minutes = await getTimerMinutes();
+  const eligible = new Set(eligibleTabIds);
+
+  await mutateDeadlines((deadlines) => {
+    // Prune entries for tabs that no longer exist or are now active/pinned.
+    // After a browser restart tab ids change, so this also clears stale
+    // entries from the previous session.
+    for (const key of Object.keys(deadlines)) {
+      if (!eligible.has(parseInt(key))) {
+        delete deadlines[key];
+      }
+    }
+
+    // Arm deadlines only for eligible tabs that don't already have one
+    const newDeadline = Date.now() + minutes * 60000;
+    for (const tabId of eligibleTabIds) {
+      if (!(tabId in deadlines)) {
+        deadlines[tabId] = newDeadline;
+      }
+    }
+
+    return deadlines;
+  });
+
+  // Alarms persist across browser restarts, but re-check cheaply anyway
+  await ensureSweepAlarm();
 }
 
 // Initialize on browser startup
