@@ -98,6 +98,57 @@ function formatDateForFolder() {
   return formatted.replace(',', '');
 }
 
+// Common two-part public suffixes so "amazon.co.uk" groups as "Amazon", not "Co"
+const TWO_PART_SUFFIXES = new Set([
+  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'me.uk',
+  'com.au', 'net.au', 'org.au',
+  'co.jp', 'ne.jp', 'or.jp',
+  'co.nz', 'net.nz', 'org.nz',
+  'co.in', 'co.kr', 'co.za', 'co.id',
+  'com.br', 'com.mx', 'com.ar', 'com.cn', 'com.tw', 'com.sg', 'com.hk', 'com.tr'
+]);
+
+// Derive a site name from a URL for grouping (e.g. "https://docs.google.com/x" -> "Google")
+// Returns null if the URL has no usable hostname (file:, data:, IP addresses, etc.)
+function getSiteName(url) {
+  let hostname;
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch (e) {
+    return null;
+  }
+
+  if (!hostname) return null;
+
+  // IP addresses (and IPv6 in brackets) don't have a meaningful site name
+  if (/^[\d.]+$/.test(hostname) || hostname.includes(':') || hostname.startsWith('[')) {
+    return null;
+  }
+
+  if (hostname.startsWith('www.')) {
+    hostname = hostname.slice(4);
+  }
+
+  const parts = hostname.split('.');
+  let label;
+
+  if (parts.length === 1) {
+    // Bare hostname like "localhost"
+    label = parts[0];
+  } else if (parts.length >= 3 && TWO_PART_SUFFIXES.has(parts.slice(-2).join('.'))) {
+    // e.g. "shop.amazon.co.uk" -> "amazon"
+    label = parts[parts.length - 3];
+  } else {
+    // e.g. "docs.google.com" -> "google"
+    label = parts[parts.length - 2];
+  }
+
+  if (!label) return null;
+
+  // Capitalize first letter for the folder title
+  return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
 // Find or create the parent TabHoardersFriend folder
 async function getOrCreateParentFolder() {
   // Check cache first
@@ -216,11 +267,21 @@ async function urlExistsInHoard(url) {
   for (const folder of dayFolders) {
     if (folder.url) continue; // Skip if it's a bookmark, not a folder
 
-    // Get bookmarks in this day folder
-    const bookmarks = await chrome.bookmarks.getChildren(folder.id);
-    for (const bookmark of bookmarks) {
-      if (bookmark.url === url) {
-        return true;
+    // Get items in this day folder (loose bookmarks and site sub-folders)
+    const items = await chrome.bookmarks.getChildren(folder.id);
+    for (const item of items) {
+      if (item.url) {
+        if (item.url === url) {
+          return true;
+        }
+      } else {
+        // Site sub-folder - check its bookmarks too
+        const subItems = await chrome.bookmarks.getChildren(item.id);
+        for (const sub of subItems) {
+          if (sub.url === url) {
+            return true;
+          }
+        }
       }
     }
   }
@@ -228,8 +289,54 @@ async function urlExistsInHoard(url) {
   return false;
 }
 
-// Save tab URL to bookmarks
-async function saveTabToBookmarks(tab) {
+// Decide which folder a URL should be bookmarked into within today's folder.
+// Returns a site sub-folder id when 2+ bookmarks share the same site
+// (creating the sub-folder and moving earlier loose bookmarks in if needed),
+// otherwise returns the day folder id so singles stay loose.
+async function getSiteFolderForUrl(dayFolderId, url) {
+  const siteName = getSiteName(url);
+  if (!siteName) {
+    return dayFolderId;
+  }
+
+  const children = await chrome.bookmarks.getChildren(dayFolderId);
+
+  // Site sub-folder already exists for today
+  const existingFolder = children.find(item => !item.url && item.title === siteName);
+  if (existingFolder) {
+    return existingFolder.id;
+  }
+
+  // Look for loose bookmarks from the same site saved earlier today
+  const looseMatches = children.filter(item => item.url && getSiteName(item.url) === siteName);
+  if (looseMatches.length > 0) {
+    const siteFolder = await chrome.bookmarks.create({
+      parentId: dayFolderId,
+      title: siteName
+    });
+    for (const bookmark of looseMatches) {
+      await chrome.bookmarks.move(bookmark.id, { parentId: siteFolder.id });
+    }
+    return siteFolder.id;
+  }
+
+  // First bookmark for this site today - stays loose in the day folder
+  return dayFolderId;
+}
+
+// Serialize saves so concurrent alarm firings can't race on folder
+// scanning/creation (same idea as folderCreationPromise above)
+let saveChain = Promise.resolve();
+
+// Save tab URL to bookmarks (queued so saves run one at a time)
+function saveTabToBookmarks(tab) {
+  const run = saveChain.then(() => doSaveTabToBookmarks(tab));
+  saveChain = run.catch(() => {}); // keep the chain alive if a save fails
+  return run;
+}
+
+// Save tab URL to bookmarks, grouping same-site tabs into a sub-folder
+async function doSaveTabToBookmarks(tab) {
   if (!tab || !tab.url) return;
 
   if (tab.url.startsWith('chrome://') ||
@@ -243,14 +350,17 @@ async function saveTabToBookmarks(tab) {
     return;
   }
 
-  const folderId = await getOrCreateTodayFolder();
+  const dayFolderId = await getOrCreateTodayFolder();
+
+  // Group into a site sub-folder if this site already has a bookmark today
+  const parentId = await getSiteFolderForUrl(dayFolderId, tab.url);
 
   // Use custom name if set, otherwise use page title, fallback to URL
   const customName = await getCustomTabName(tab.id);
   let bookmarkTitle = customName || tab.title || tab.url;
 
   await chrome.bookmarks.create({
-    parentId: folderId,
+    parentId: parentId,
     title: bookmarkTitle,
     url: tab.url
   });
@@ -372,11 +482,22 @@ async function exportHoardData() {
       // Skip if it's a bookmark, not a folder
       if (folder.url) continue;
 
-      // Get bookmarks in this day folder
-      const bookmarks = await chrome.bookmarks.getChildren(folder.id);
-      const urls = bookmarks
-        .filter(b => b.url)
-        .map(b => ({ title: b.title, url: b.url }));
+      // Collect bookmarks in this day folder, including site sub-folders (flattened)
+      const items = await chrome.bookmarks.getChildren(folder.id);
+      const urls = [];
+
+      for (const item of items) {
+        if (item.url) {
+          urls.push({ title: item.title, url: item.url });
+        } else {
+          const subItems = await chrome.bookmarks.getChildren(item.id);
+          for (const sub of subItems) {
+            if (sub.url) {
+              urls.push({ title: sub.title, url: sub.url });
+            }
+          }
+        }
+      }
 
       if (urls.length > 0) {
         exportData.push({
