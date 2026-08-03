@@ -461,7 +461,43 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     exportHoardData().then(sendResponse);
     return true;
   }
+  if (message.action === 'exportHoardBookmarks') {
+    exportHoardBookmarksData().then(sendResponse);
+    return true;
+  }
 });
+
+// Export the full hoard tree (day folders, site sub-folders, bookmarks)
+// as plain nested objects for the bookmarks HTML export
+async function exportHoardBookmarksData() {
+  try {
+    // Find the parent folder
+    const searchResults = await chrome.bookmarks.search({ title: PARENT_FOLDER_NAME });
+    const parentFolder = searchResults.find(item => !item.url && item.title === PARENT_FOLDER_NAME);
+
+    if (!parentFolder) {
+      return { success: false, error: 'No TabHoardersFriend folder found' };
+    }
+
+    const [subTree] = await chrome.bookmarks.getSubTree(parentFolder.id);
+
+    // Strip down to serializable nodes: bookmarks keep url, folders keep children
+    function simplify(node) {
+      if (node.url) {
+        return { title: node.title, url: node.url, dateAdded: node.dateAdded };
+      }
+      return {
+        title: node.title,
+        dateAdded: node.dateAdded,
+        children: (node.children || []).map(simplify)
+      };
+    }
+
+    return { success: true, tree: simplify(subTree) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+}
 
 // Export all day folders as data for CSV generation
 async function exportHoardData() {

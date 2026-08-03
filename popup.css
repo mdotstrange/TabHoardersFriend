@@ -203,6 +203,19 @@ h1 {
   transform: none;
 }
 
+/* Bookmarks export button (blue variant) */
+.export-bookmarks-btn {
+  background: linear-gradient(135deg, #4a9eff, #2d7dd2);
+}
+
+.export-bookmarks-btn:hover {
+  background: linear-gradient(135deg, #63adff, #4a9eff);
+}
+
+.export-bookmarks-btn:disabled {
+  background: #444;
+}
+
 /* Info section */
 .info {
   background: #252540;

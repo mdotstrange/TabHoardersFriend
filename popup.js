@@ -7,6 +7,7 @@ const clearNameBtn = document.getElementById('clear-name');
 const currentNameDisplay = document.getElementById('current-name');
 const hoardAllBtn = document.getElementById('hoard-all');
 const exportBtn = document.getElementById('export-hoard');
+const exportBookmarksBtn = document.getElementById('export-bookmarks');
 
 let currentTabId = null;
 
@@ -139,7 +140,7 @@ exportBtn.addEventListener('click', async () => {
       // Generate and download CSV for each day folder
       for (const folder of response.data) {
         const csvContent = generateCSV(folder.bookmarks);
-        downloadCSV(csvContent, `${folder.folderName}.csv`);
+        downloadFile(csvContent, `${folder.folderName}.csv`, 'text/csv;charset=utf-8;');
       }
       showStatus(`Exported ${response.data.length} CSV file${response.data.length > 1 ? 's' : ''}!`);
     } else if (response && response.error) {
@@ -155,6 +156,81 @@ exportBtn.addEventListener('click', async () => {
   exportBtn.textContent = 'Export Hoard as CSV';
 });
 
+// Export hoard as an importable bookmarks HTML file
+exportBookmarksBtn.addEventListener('click', async () => {
+  exportBookmarksBtn.disabled = true;
+  exportBookmarksBtn.textContent = 'Exporting...';
+
+  try {
+    const response = await chrome.runtime.sendMessage({ action: 'exportHoardBookmarks' });
+
+    if (response && response.success && countBookmarks(response.tree) > 0) {
+      const html = generateBookmarksHTML(response.tree);
+      downloadFile(html, 'TabHoardersFriend Bookmarks.html', 'text/html;charset=utf-8;');
+      showStatus('Exported bookmarks file!');
+    } else if (response && response.error) {
+      showStatus(response.error);
+    } else {
+      showStatus('No bookmarks to export');
+    }
+  } catch (error) {
+    showStatus('Error exporting');
+  }
+
+  exportBookmarksBtn.disabled = false;
+  exportBookmarksBtn.textContent = 'Export Hoard as Bookmarks';
+});
+
+// Count bookmarks anywhere in the exported tree
+function countBookmarks(node) {
+  if (node.url) return 1;
+  return (node.children || []).reduce((sum, child) => sum + countBookmarks(child), 0);
+}
+
+// Escape text for the bookmarks HTML file
+function escapeHTML(text) {
+  return (text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Generate a Netscape Bookmark File (importable by Chrome, Firefox, Edge, Safari, etc.)
+function generateBookmarksHTML(tree) {
+  const lines = [
+    '<!DOCTYPE NETSCAPE-Bookmark-file-1>',
+    '<!-- This is an automatically generated file.',
+    '     It will be read and overwritten.',
+    '     DO NOT EDIT! -->',
+    '<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">',
+    '<TITLE>Bookmarks</TITLE>',
+    '<H1>Bookmarks</H1>',
+    '<DL><p>'
+  ];
+
+  function appendNode(node, depth) {
+    const indent = '    '.repeat(depth);
+    // Netscape format uses seconds; Chrome's dateAdded is milliseconds
+    const addDate = node.dateAdded ? ` ADD_DATE="${Math.floor(node.dateAdded / 1000)}"` : '';
+
+    if (node.url) {
+      lines.push(`${indent}<DT><A HREF="${escapeHTML(node.url)}"${addDate}>${escapeHTML(node.title)}</A>`);
+    } else {
+      lines.push(`${indent}<DT><H3${addDate}>${escapeHTML(node.title)}</H3>`);
+      lines.push(`${indent}<DL><p>`);
+      for (const child of node.children || []) {
+        appendNode(child, depth + 1);
+      }
+      lines.push(`${indent}</DL><p>`);
+    }
+  }
+
+  appendNode(tree, 1);
+  lines.push('</DL><p>');
+  return lines.join('\n');
+}
+
 // Generate CSV content from bookmarks
 function generateCSV(bookmarks) {
   const header = 'Title,URL';
@@ -167,9 +243,9 @@ function generateCSV(bookmarks) {
   return [header, ...rows].join('\n');
 }
 
-// Download a CSV file
-function downloadCSV(content, filename) {
-  const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+// Download a file
+function downloadFile(content, filename, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
